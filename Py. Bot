@@ -1,0 +1,77 @@
+import os
+import subprocess
+import tempfile
+import logging
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+
+BOT_TOKEN = os.environ.get("BOT_TOKEN")  # Zai dauko daga Render
+logging.basicConfig(level=logging.INFO)
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Bot yana aiki 24/7! 📱⚡️\nAiko min da video zan danne shi.\n\n/medium - daidai (default)\n/low - karami sosai"
+    )
+
+user_quality = {}
+QUALITY = {
+    "low": {"crf": "32", "preset": "veryfast", "scale": "640:-2"},
+    "medium": {"crf": "28", "preset": "fast", "scale": "854:-2"},
+    "high": {"crf": "23", "preset": "medium", "scale": "1280:-2"}
+}
+
+async def set_q(update, context):
+    q = context.args[0].lower() if context.args else "medium"
+    if q in QUALITY:
+        user_quality[update.effective_user.id] = q
+        await update.message.reply_text(f"Quality: {q.upper()} ✅")
+    else:
+        await update.message.reply_text("Yi /low /medium /high")
+
+def compress_video(inp, out, q="medium"):
+    s = QUALITY.get(q, QUALITY["medium"])
+    cmd = ["ffmpeg", "-i", inp, "-vcodec", "libx264", "-crf", s["crf"], "-preset", s["preset"], "-vf", f"scale={s['scale']}", "-acodec", "aac", "-b:a", "96k", "-y", out]
+    try:
+        subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        logging.error(e.stderr.decode())
+        return False
+
+async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = user_quality.get(update.effective_user.id, "medium")
+    status = await update.message.reply_text(f"📥 Ina saukewa... ({q})")
+    try:
+        file = await update.message.video.get_file() if update.message.video else await update.message.document.get_file()
+        with tempfile.TemporaryDirectory() as tmp:
+            inp = os.path.join(tmp, "in.mp4")
+            out = os.path.join(tmp, "out.mp4")
+            await file.download_to_drive(inp)
+            s1 = os.path.getsize(inp) / (1024*1024)
+            await status.edit_text(f"⚙️ Ina dannewa {s1:.1f}MB -> ... Jira ⏳")
+            if not compress_video(inp, out, q):
+                await status.edit_text("❌ FFmpeg ya gagara")
+                return
+            s2 = os.path.getsize(out) / (1024*1024)
+            await status.edit_text(f"📤 Ina turawa {s2:.1f}MB...")
+            await update.message.reply_video(video=open(out,'rb'), caption=f"✅ Daga {s1:.1f}MB -> {s2:.1f}MB\nAn rage {100-(s2/s1*100):.1f}%", supports_streaming=True)
+            await status.delete()
+    except Exception as e:
+        await status.edit_text(f"Kuskure: {e}")
+
+def main():
+    if not BOT_TOKEN:
+        print("Saka BOT_TOKEN a Environment Variable!")
+        return
+    app = Application.builder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("low", lambda u,c: set_q(u, type('obj', (object,), {'args': ['low']})())))
+    app.add_handler(CommandHandler("medium", lambda u,c: set_q(u, type('obj', (object,), {'args': ['medium']})())))
+    app.add_handler(CommandHandler("high", lambda u,c: set_q(u, type('obj', (object,), {'args': ['high']})())))
+    app.add_handler(MessageHandler(filters.VIDEO | filters.Document.VIDEO, handle_video))
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
+python-telegram-bot==20.7
+ffmpeg-python
